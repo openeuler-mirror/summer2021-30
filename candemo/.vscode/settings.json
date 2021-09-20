@@ -1,9 +1,0 @@
-{
-    "files.associations": {
-        "can.h": "c",
-        "raw.h": "c",
-        "if.h": "c",
-        "socket.h": "c",
-        "unistd.h": "c"
-    }
-}

@@ -1,12 +1,12 @@
 diff --git a/include/linux/lsm_hooks.h b/include/linux/lsm_hooks.h
-index 3833c871fd45..8b405f74f855 100644
+index 3833c871fd45..e26690077238 100644
 --- a/include/linux/lsm_hooks.h
 +++ b/include/linux/lsm_hooks.h
 @@ -1717,6 +1717,7 @@ union security_list_options {
  				 struct sockaddr *address, int addrlen);
  	void (*sctp_sk_clone)(struct sctp_endpoint *ep, struct sock *sk,
  			      struct sock *newsk);
-+	void (*raw_recvmsg)(struct sk_buff *skb);
++	int (*raw_recvmsg)(struct sock *sk, struct sk_buff *skb);
  #endif	/* CONFIG_SECURITY_NETWORK */
  
  #ifdef CONFIG_SECURITY_INFINIBAND
@@ -19,7 +19,7 @@ index 3833c871fd45..8b405f74f855 100644
  #ifdef CONFIG_SECURITY_INFINIBAND
  	struct hlist_head ib_pkey_access;
 diff --git a/include/linux/security.h b/include/linux/security.h
-index 454cc963d145..36792dc562f0 100644
+index 454cc963d145..aee442eca116 100644
 --- a/include/linux/security.h
 +++ b/include/linux/security.h
 @@ -1246,7 +1246,7 @@ int security_sctp_bind_connect(struct sock *sk, int optname,
@@ -27,22 +27,23 @@ index 454cc963d145..36792dc562f0 100644
  void security_sctp_sk_clone(struct sctp_endpoint *ep, struct sock *sk,
  			    struct sock *newsk);
 -
-+void security_raw_recvmsg(struct sk_buff *skb);
++int security_raw_recvmsg(struct sock *sk, struct sk_buff *skb);
  #else	/* CONFIG_SECURITY_NETWORK */
  static inline int security_unix_stream_connect(struct sock *sock,
  					       struct sock *other,
-@@ -1463,6 +1463,9 @@ static inline void security_sctp_sk_clone(struct sctp_endpoint *ep,
+@@ -1463,6 +1463,10 @@ static inline void security_sctp_sk_clone(struct sctp_endpoint *ep,
  					  struct sock *newsk)
  {
  }
-+static inline void security_raw_recvmsg(struct sk_buff *skb)
++static inline int security_raw_recvmsg(struct sock *sk, struct sk_buff *skb)
 +{
++	return 0;
 +}
  #endif	/* CONFIG_SECURITY_NETWORK */
  
  #ifdef CONFIG_SECURITY_INFINIBAND
 diff --git a/net/can/raw.c b/net/can/raw.c
-index 6963293e59fd..f48496e30d28 100644
+index 6963293e59fd..246bb51b6bc1 100644
 --- a/net/can/raw.c
 +++ b/net/can/raw.c
 @@ -54,6 +54,7 @@
@@ -112,12 +113,12 @@ index 6963293e59fd..f48496e30d28 100644
  		return err;
  	}
 -
-+	security_raw_recvmsg(skb);
++	security_raw_recvmsg(sk, skb);
  	sock_recv_ts_and_drops(msg, sk, skb);
  
  	if (msg->msg_name) {
 diff --git a/security/security.c b/security/security.c
-index b4f8c0956882..4d2b68863f6b 100644
+index b4f8c0956882..9f1b9a8fe738 100644
 --- a/security/security.c
 +++ b/security/security.c
 @@ -1581,7 +1581,11 @@ void security_sctp_sk_clone(struct sctp_endpoint *ep, struct sock *sk,
@@ -125,31 +126,46 @@ index b4f8c0956882..4d2b68863f6b 100644
  }
  EXPORT_SYMBOL(security_sctp_sk_clone);
 -
-+void security_raw_recvmsg(struct sk_buff *skb)
++int security_raw_recvmsg(struct sock *sk, struct sk_buff *skb)
 +{
-+	call_void_hook(raw_recvmsg, skb);
++	return call_int_hook(raw_recvmsg, 0, sk, skb);
 +}
 +EXPORT_SYMBOL(security_raw_recvmsg);
  #endif	/* CONFIG_SECURITY_NETWORK */
  
  #ifdef CONFIG_SECURITY_INFINIBAND
 diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index fcdd3fb2195f..b85b3ef173ea 100644
+index fcdd3fb2195f..9b92d8773b23 100644
 --- a/security/selinux/hooks.c
 +++ b/security/selinux/hooks.c
-@@ -6979,7 +6979,10 @@ static void selinux_bpf_prog_free(struct bpf_prog_aux *aux)
+@@ -6979,7 +6979,26 @@ static void selinux_bpf_prog_free(struct bpf_prog_aux *aux)
  	kfree(bpfsec);
  }
  #endif
--
-+static void selinux_raw_recvmsg(struct sk_buff *skb)
++static int selinux_raw_recvmsg(struct sock *sk, struct sk_buff *skb)
 +{
-+	printk("[+canhook] call raw_recvmsg(). iif=%d\n", skb->skb_iif);
++	u32 sid;
++	
++	struct sk_security_struct *sksec = sk->sk_security;
++	struct common_audit_data ad;
++	struct lsm_network_audit net = {0,};
++
++	ad.type = LSM_AUDIT_DATA_NET;
++	ad.u.net = &net;
++	ad.u.net->sk = sk;
++	sel_netif_sid(sock_net(sk), skb->skb_iif, &sid);
++	printk("[+canhook] call raw_recvmsg(). iif=%d, currect_sid=%d, sid=%d\n", skb->skb_iif, current_sid(), sid);
++	return avc_has_perm(&selinux_state,
++			    current_sid(), sid, sksec->sclass, SOCKET__READ,
++			    &ad);
++	
++	//return 0;
+ 
 +}
  static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
  	LSM_HOOK_INIT(binder_set_context_mgr, selinux_binder_set_context_mgr),
  	LSM_HOOK_INIT(binder_transaction, selinux_binder_transaction),
-@@ -7169,6 +7172,7 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
+@@ -7169,6 +7188,7 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
  	LSM_HOOK_INIT(tun_dev_attach_queue, selinux_tun_dev_attach_queue),
  	LSM_HOOK_INIT(tun_dev_attach, selinux_tun_dev_attach),
  	LSM_HOOK_INIT(tun_dev_open, selinux_tun_dev_open),
